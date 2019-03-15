@@ -1,0 +1,174 @@
+package hcl
+
+import org.apache.spark.SparkContext
+MainClass.scala
+//Object File
+
+import org.apache.spark.sql.{SQLContext, SparkSession}
+import org.apache.spark.streaming.{Seconds, StreamingContext}
+import org.apache.log4j.{Level, Logger}
+import scala.collection.mutable
+
+
+object MainClass extends Serializable {
+  def main(args: Array[String]): Unit = {
+
+    Logger.getLogger("org").setLevel(Level.WARN)
+    Logger.getLogger("akka").setLevel(Level.WARN)
+
+    //SparkSession
+    val spark : SparkSession= SparkSession
+      .builder()
+      .master("yarn")
+      .master("local[*]")
+      //.appName("My App")
+      .getOrCreate()
+
+    // SparkContext
+    val sc : SparkContext = spark.sparkContext
+
+    // SqlContext
+    val sparksql : SQLContext= spark.sqlContext
+
+    // StreamingContext
+    val ssc : StreamingContext= new StreamingContext(sc, Seconds(10))
+
+
+    // Call Kafka Producer Class
+    val producerclass = new SimpleKafkaProducer(sc,spark,sparksql)
+    println("Started Kafka Producer")
+    // Call Kafka Consumer Class
+    val consumerclass = new SimpleKafkaConsumer(sc,spark,sparksql,ssc)
+    println("Started Kafka Consumer")
+
+    ssc.start()
+    println("Started Streaming")
+    ssc.awaitTermination()
+
+  }
+}
+***************************************************************************************************************
+readfile.scala
+
+package hcl
+
+import org.apache.spark.sql.{DataFrame, SparkSession}
+
+class readFile(spark:SparkSession) {
+
+  def rdFile(filePath:String):String={
+    val df = spark.read.option("header","true").csv(filePath)
+    df.toJSON.collectAsList().toString
+  }
+}
+*************************************************************************************************
+SimpleKafkaConsumer.scala
+
+package hcl
+
+import org.apache.log4j.{Level, Logger}
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{SQLContext, SparkSession}
+import org.apache.spark.streaming.StreamingContext
+import org.apache.spark.streaming.kafka._
+
+
+//object com.figmd.kafkaspark.SimpleKafkaConsumer extends Serializable {
+class SimpleKafkaConsumer(sc:SparkContext,sparkSess:SparkSession, sparksql:SQLContext, ssc:StreamingContext)
+  extends Serializable {
+
+  Logger.getLogger("org").setLevel(Level.WARN)
+  Logger.getLogger("akka").setLevel(Level.WARN)
+
+  //createKafkaStream (streamingContext,[ZK quorum],[consumer group id],[per-topic number of Kafka partitions to consume])
+  val kafkaStream = KafkaUtils.createStream(ssc, "dbmaster.southindia.cloudapp.azure.com:2181","group-3", Map("my-topic-new" -> 1))
+  //Read KafkaStream
+  kafkaStream.foreachRDD { rdd =>
+    val data = rdd.map(record => record._2)
+    val json = sparksql.read.json(data)
+    json.show(false)
+    json.write.csv("hdfs://dbmaster.southindia.cloudapp.azure.com:8020/user/dbuse2/results")
+    println("Write to kafka topic")
+  }
+
+}
+***************************************************************************************************
+SimpleKafkaProducer.scala
+
+package hcl
+
+import java.util.Properties
+import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
+import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.{DataFrame, SQLContext, SparkSession}
+
+
+class SimpleKafkaProducer(sc : SparkContext,spark : SparkSession , sparksql : SQLContext) extends Serializable {
+
+  val xp = new readFile(spark)
+  val xpp: String = xp.rdFile("/usr/share/usecase/2010_Census_Populations_by_Zip_Code.csv")
+
+  //Configuration Settings of Producer
+  val props: Properties = new Properties()
+  props.put("bootstrap.servers", "dbmaster.southindia.cloudapp.azure.com:9092")
+  props.put("key.serializer","org.apache.kafka.common.serialization.StringSerializer")
+  props.put("value.serializer","org.apache.kafka.connect.json.JsonSerializer")
+
+  //Create kafkaProducer Object
+  val producer  = new KafkaProducer[String, JsonNode](props)
+  val objectMapper: ObjectMapper = new ObjectMapper()
+
+  val jsonstring: String = xpp
+  val jsonNode: JsonNode = objectMapper.readTree(jsonstring)
+  val rec: ProducerRecord[String, JsonNode] = new ProducerRecord[String, JsonNode]("my-topic-new", jsonNode)
+  producer.send(rec)
+
+}
+**************************************************************************************************
+build.sbt
+
+name := "kafka_producer_consumer"
+
+version := "0.1"
+
+scalaVersion := "2.12.8"
+
+
+//name := "poc_1"
+
+//version := "0.3"
+
+scalaVersion := "2.11.0"
+
+libraryDependencies ++= Seq("org.apache.spark" %% "spark-core" % "2.3.1" % "provided",
+  "org.apache.spark" %% "spark-streaming" % "2.3.1" ,
+  "org.apache.spark" %% "spark-streaming-kafka-0-8" % "2.3.1",
+  "org.apache.spark" %% "spark-sql" % "2.3.1" % "provided",
+  "org.apache.kafka" % "connect-json" % "1.1.1",
+  "com.typesafe" % "config" % "1.2.1")
+
+pomExtra :=
+  <url>https://github.com/databricks/spark-xml</url>
+    <licenses>
+      <license>
+        <name>Apache License, Version 2.0</name>
+        <url>http://www.apache.org/licenses/LICENSE-2.0.html</url>
+        <distribution>repo</distribution>
+      </license>
+    </licenses>
+    <scm>
+      <url>git@github.com:databricks/spark-xml.git</url>
+      <connection>scm:git:git@github.com:databricks/spark-xml.git</connection>
+    </scm>
+
+
+assemblyMergeStrategy in assembly := {
+  case PathList("META-INF", xs @ _*) => MergeStrategy.discard
+  case x => MergeStrategy.first
+}
+*****************************************************************************
+assembly.sbt
+//add this file to project folder
+
+addSbtPlugin("com.eed3si9n" % "sbt-assembly" % "0.14.7")
